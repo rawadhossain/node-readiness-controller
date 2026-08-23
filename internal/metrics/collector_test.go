@@ -28,12 +28,17 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	readinessv1alpha1 "sigs.k8s.io/node-readiness-controller/api/v1alpha1"
 )
 
 // stubLister is a test double for RuleNodeStateLister.
 type stubLister struct {
 	nodes    []corev1.Node
 	nodesErr error
+
+	rules    []*readinessv1alpha1.NodeReadinessRule
+	rulesErr error
 
 	counts map[string]RuleNodeCounts
 	err    error
@@ -44,6 +49,8 @@ type stubLister struct {
 	mu                    sync.Mutex
 	gotNodesForRuleStates []corev1.Node
 	gotNodesForBlocked    []corev1.Node
+	gotRulesForRuleStates []*readinessv1alpha1.NodeReadinessRule
+	gotRulesForBlocked    []*readinessv1alpha1.NodeReadinessRule
 }
 
 func (s *stubLister) ListNodes(_ context.Context) ([]corev1.Node, error) {
@@ -53,9 +60,17 @@ func (s *stubLister) ListNodes(_ context.Context) ([]corev1.Node, error) {
 	return s.nodes, nil
 }
 
-func (s *stubLister) ListRuleNodeStates(_ context.Context, nodes []corev1.Node) (map[string]RuleNodeCounts, error) {
+func (s *stubLister) ListRules(_ context.Context) ([]*readinessv1alpha1.NodeReadinessRule, error) {
+	if s.rulesErr != nil {
+		return nil, s.rulesErr
+	}
+	return s.rules, nil
+}
+
+func (s *stubLister) ListRuleNodeStates(_ context.Context, nodes []corev1.Node, rules []*readinessv1alpha1.NodeReadinessRule) (map[string]RuleNodeCounts, error) {
 	s.mu.Lock()
 	s.gotNodesForRuleStates = nodes
+	s.gotRulesForRuleStates = rules
 	s.mu.Unlock()
 	if s.err != nil {
 		return nil, s.err
@@ -63,9 +78,10 @@ func (s *stubLister) ListRuleNodeStates(_ context.Context, nodes []corev1.Node) 
 	return s.counts, nil
 }
 
-func (s *stubLister) ListBlockedNodes(_ context.Context, nodes []corev1.Node) (map[string]RuleBlockedConditions, error) {
+func (s *stubLister) ListBlockedNodes(_ context.Context, nodes []corev1.Node, rules []*readinessv1alpha1.NodeReadinessRule) (map[string]RuleBlockedConditions, error) {
 	s.mu.Lock()
 	s.gotNodesForBlocked = nodes
+	s.gotRulesForBlocked = rules
 	s.mu.Unlock()
 	if s.blockedErr != nil {
 		return nil, s.blockedErr
@@ -284,6 +300,52 @@ func TestReadinessCollector_NodesSharedBetweenBothListers(t *testing.T) {
 	}
 	if len(stub.gotNodesForBlocked) != 1 || stub.gotNodesForBlocked[0].Name != "node-a" {
 		t.Fatalf("ListBlockedNodes did not receive the shared node snapshot: %v", stub.gotNodesForBlocked)
+	}
+}
+
+func TestReadinessCollector_RuleListErrorSkipsBothMetrics(t *testing.T) {
+	stub := &stubLister{
+		rulesErr: errors.New("rule cache not synced"),
+		counts:   map[string]RuleNodeCounts{"gpu-ready": {Held: 1, Released: 1}},
+		blocked:  map[string]RuleBlockedConditions{"gpu-ready": {"GPUDriverReady": 1}},
+	}
+	c := NewReadinessCollector(stub)
+
+	got := collectAll(t, c)
+
+	if len(got["node_readiness_rule_nodes"]) != 0 {
+		t.Fatalf("expected no node_readiness_rule_nodes metrics when ListRules fails, got %v", got["node_readiness_rule_nodes"])
+	}
+	if len(got["node_readiness_blocked_nodes"]) != 0 {
+		t.Fatalf("expected no node_readiness_blocked_nodes metrics when ListRules fails, got %v", got["node_readiness_blocked_nodes"])
+	}
+
+	if stub.gotRulesForRuleStates != nil || stub.gotRulesForBlocked != nil {
+		t.Fatalf("expected Collect to short-circuit before calling either counting method, but ListRuleNodeStates got %v, ListBlockedNodes got %v",
+			stub.gotRulesForRuleStates, stub.gotRulesForBlocked)
+	}
+}
+
+func TestReadinessCollector_RulesSharedBetweenBothListers(t *testing.T) {
+	rules := []*readinessv1alpha1.NodeReadinessRule{{ObjectMeta: metav1.ObjectMeta{Name: "gpu-ready"}}}
+	stub := &stubLister{
+		rules:   rules,
+		counts:  map[string]RuleNodeCounts{},
+		blocked: map[string]RuleBlockedConditions{},
+	}
+	c := NewReadinessCollector(stub)
+
+	ch := make(chan prometheus.Metric, 4)
+	c.Collect(ch)
+	close(ch)
+	for range ch {
+	}
+
+	if len(stub.gotRulesForRuleStates) != 1 || stub.gotRulesForRuleStates[0].Name != "gpu-ready" {
+		t.Fatalf("ListRuleNodeStates did not receive the shared rule snapshot: %v", stub.gotRulesForRuleStates)
+	}
+	if len(stub.gotRulesForBlocked) != 1 || stub.gotRulesForBlocked[0].Name != "gpu-ready" {
+		t.Fatalf("ListBlockedNodes did not receive the shared rule snapshot: %v", stub.gotRulesForBlocked)
 	}
 }
 

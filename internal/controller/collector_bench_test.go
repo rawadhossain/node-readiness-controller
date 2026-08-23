@@ -83,11 +83,15 @@ func BenchmarkListRuleNodeStates(b *testing.B) {
 			b.Run(fmt.Sprintf("nodes=%d/rules=%d", nodeCount, ruleCount), func(b *testing.B) {
 				c, nodes := buildBenchController(b, nodeCount, ruleCount)
 				ctx := b.Context()
+				rules, err := c.ListRules(ctx)
+				if err != nil {
+					b.Fatalf("ListRules failed: %v", err)
+				}
 
 				b.ResetTimer()
 				b.ReportAllocs()
 				for range b.N {
-					if _, err := c.ListRuleNodeStates(ctx, nodes); err != nil {
+					if _, err := c.ListRuleNodeStates(ctx, nodes, rules); err != nil {
 						b.Fatalf("ListRuleNodeStates failed: %v", err)
 					}
 				}
@@ -176,11 +180,15 @@ func BenchmarkListBlockedNodes(b *testing.B) {
 				b.Run(fmt.Sprintf("nodes=%d/rules=%d/conditions=%d", nodeCount, ruleCount, conditionsPerRule), func(b *testing.B) {
 					c, nodes := buildBlockedNodesBenchController(b, nodeCount, ruleCount, conditionsPerRule)
 					ctx := b.Context()
+					rules, err := c.ListRules(ctx)
+					if err != nil {
+						b.Fatalf("ListRules failed: %v", err)
+					}
 
 					b.ResetTimer()
 					b.ReportAllocs()
 					for range b.N {
-						if _, err := c.ListBlockedNodes(ctx, nodes); err != nil {
+						if _, err := c.ListBlockedNodes(ctx, nodes, rules); err != nil {
 							b.Fatalf("ListBlockedNodes failed: %v", err)
 						}
 					}
@@ -285,10 +293,14 @@ func BenchmarkCollectSharedNodeList(b *testing.B) {
 						if err != nil {
 							b.Fatalf("ListNodes failed: %v", err)
 						}
-						if _, err := c.ListRuleNodeStates(ctx, nodes); err != nil {
+						rules, err := c.ListRules(ctx)
+						if err != nil {
+							b.Fatalf("ListRules failed: %v", err)
+						}
+						if _, err := c.ListRuleNodeStates(ctx, nodes, rules); err != nil {
 							b.Fatalf("ListRuleNodeStates failed: %v", err)
 						}
-						if _, err := c.ListBlockedNodes(ctx, nodes); err != nil {
+						if _, err := c.ListBlockedNodes(ctx, nodes, rules); err != nil {
 							b.Fatalf("ListBlockedNodes failed: %v", err)
 						}
 					}

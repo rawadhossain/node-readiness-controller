@@ -110,7 +110,7 @@ Number of nodes currently held or released by each `NodeReadinessRule`, collecte
 
 *Available starting from the v0.6.0 release.*
 
-Number of currently-held nodes blocked by each unsatisfied condition, per `NodeReadinessRule`, collected at scrape time from the controller cache.
+Number of currently-held nodes against blocking conditions per `NodeReadinessRule`.
 
 | Property | Value |
 | --- | --- |
@@ -122,7 +122,7 @@ Number of currently-held nodes blocked by each unsatisfied condition, per `NodeR
 
 | Label | Description | Values |
 | --- | --- | --- |
-| `rule` | `NodeReadinessRule` name | Any non-dry-run rule name with a valid selector |
+| `rule` | `NodeReadinessRule` name | Any non-dry-run rule name |
 | `condition` | Condition type declared in `spec.conditions` | Any condition type declared by the rule |
 
 ### `node_readiness_bootstrap_completed_total`

@@ -140,7 +140,10 @@ func TestListRuleNodeStates_NoRules(t *testing.T) {
 		Client: fc,
 	}
 
-	counts, err := c.ListRuleNodeStates(t.Context(), nil)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	counts, err := c.ListRuleNodeStates(t.Context(), nil, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(counts).To(BeEmpty())
 }
@@ -155,7 +158,10 @@ func TestListRuleNodeStates_ZeroMatches(t *testing.T) {
 		{ObjectMeta: metav1.ObjectMeta{Name: "cpu-node"}},
 	}
 
-	counts, err := c.ListRuleNodeStates(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	counts, err := c.ListRuleNodeStates(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(counts).To(Equal(map[string]metrics.RuleNodeCounts{
 		"gpu-ready": {Held: 0, Released: 0},
@@ -175,7 +181,10 @@ func TestListRuleNodeStates_MixedHeldReleased(t *testing.T) {
 		{ObjectMeta: metav1.ObjectMeta{Name: "non-matching"}},
 	}
 
-	counts, err := c.ListRuleNodeStates(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	counts, err := c.ListRuleNodeStates(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(counts).To(Equal(map[string]metrics.RuleNodeCounts{
 		"gpu-ready": {Held: 2, Released: 1},
@@ -192,7 +201,10 @@ func TestListRuleNodeStates_DryRunRuleExcluded(t *testing.T) {
 	}
 	nodes := []corev1.Node{*gpuNode("held-1", true)}
 
-	counts, err := c.ListRuleNodeStates(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	counts, err := c.ListRuleNodeStates(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(counts).To(BeEmpty())
 }
@@ -213,7 +225,10 @@ func TestListRuleNodeStates_DeletingRuleIncluded(t *testing.T) {
 		*gpuNode("released-1", false),
 	}
 
-	counts, err := c.ListRuleNodeStates(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	counts, err := c.ListRuleNodeStates(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(counts).To(Equal(map[string]metrics.RuleNodeCounts{
 		"gpu-ready": {Held: 2, Released: 1},
@@ -233,7 +248,10 @@ func TestListRuleNodeStates_DeletingRulePersistsUntilFinalizer(t *testing.T) {
 		Client: fc,
 	}
 
-	counts, err := c.ListRuleNodeStates(t.Context(), nil)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	counts, err := c.ListRuleNodeStates(t.Context(), nil, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(counts).To(Equal(map[string]metrics.RuleNodeCounts{
 		"gpu-ready": {Held: 0, Released: 0},
@@ -280,7 +298,10 @@ func TestListRuleNodeStates_OneRuleHeldOtherReleased(t *testing.T) {
 		Client: fc,
 	}
 
-	counts, err := c.ListRuleNodeStates(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	counts, err := c.ListRuleNodeStates(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(counts).To(Equal(map[string]metrics.RuleNodeCounts{
 		"rule-a": {Held: 1, Released: 0},
@@ -317,12 +338,41 @@ func TestListRuleNodeStates_InvalidSelectorSkipped(t *testing.T) {
 		*gpuNode("released-1", false),
 	}
 
-	counts, err := c.ListRuleNodeStates(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	counts, err := c.ListRuleNodeStates(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(counts).NotTo(HaveKey(invalidRule.Name))
 	g.Expect(counts).To(Equal(map[string]metrics.RuleNodeCounts{
 		"gpu-ready": {Held: 1, Released: 1},
 	}))
+}
+
+func TestCleanupTaintsForRule_InvalidSelectorReturnsNil(t *testing.T) {
+	g := NewWithT(t)
+	invalidRule := &readinessv1alpha1.NodeReadinessRule{
+		ObjectMeta: metav1.ObjectMeta{Name: "invalid-selector-rule"},
+		Spec: readinessv1alpha1.NodeReadinessRuleSpec{
+			NodeSelector: metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "gpu", Operator: "BogusOperator", Values: []string{"true"}},
+				},
+			},
+			Taint: gpuTaint(),
+		},
+	}
+
+	fc := fakeclient.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
+	c := &RuleReadinessController{
+		Client: fc,
+	}
+	nodeList := &corev1.NodeList{
+		Items: []corev1.Node{*gpuNode("held-1", true)},
+	}
+
+	err := c.cleanupTaintsForRule(t.Context(), invalidRule, nodeList)
+	g.Expect(err).NotTo(HaveOccurred())
 }
 
 func TestListBlockedNodes_ZeroSeededWhenNoHeldNodes(t *testing.T) {
@@ -333,7 +383,10 @@ func TestListBlockedNodes_ZeroSeededWhenNoHeldNodes(t *testing.T) {
 		Client: fc,
 	}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nil)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nil, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
 		"gpu-ready": {"GPUDriverReady": 0, "CNIReady": 0},
@@ -351,7 +404,10 @@ func TestListBlockedNodes_UnsatisfiedConditionCounted(t *testing.T) {
 		*withNodeConditions(gpuNode("held-1", true), nodeCondition("GPUDriverReady", corev1.ConditionFalse)),
 	}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
 		"gpu-ready": {"GPUDriverReady": 1},
@@ -369,7 +425,10 @@ func TestListBlockedNodes_ReleasedNodeExcluded(t *testing.T) {
 		*withNodeConditions(gpuNode("released-1", false), nodeCondition("GPUDriverReady", corev1.ConditionFalse)),
 	}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
 		"gpu-ready": {"GPUDriverReady": 0},
@@ -389,7 +448,10 @@ func TestListBlockedNodes_MixedHeldReleased(t *testing.T) {
 		*withNodeConditions(gpuNode("released-1", false), nodeCondition("GPUDriverReady", corev1.ConditionFalse)),
 	}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
 		"gpu-ready": {"GPUDriverReady": 1},
@@ -411,7 +473,10 @@ func TestListBlockedNodes_MultipleUnsatisfiedConditions(t *testing.T) {
 		),
 	}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
 		"gpu-ready": {"GPUDriverReady": 1, "CNIReady": 1, "DiskReady": 0},
@@ -434,7 +499,10 @@ func TestListBlockedNodes_AnyOfNoConditionsSatisfied(t *testing.T) {
 		),
 	}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
 		"gpu-ready": {"GPUDriverReady": 1, "CNIReady": 1},
@@ -457,7 +525,10 @@ func TestListBlockedNodes_AnyOfWithSatisfiedCondition(t *testing.T) {
 		),
 	}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
 		"gpu-ready": {"GPUDriverReady": 1, "CNIReady": 0},
@@ -510,7 +581,10 @@ func TestListBlockedNodes_SharedConditionAcrossRules(t *testing.T) {
 		Client: fc,
 	}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
 		"rule-a": {"GPUDriverReady": 1},
@@ -530,12 +604,15 @@ func TestListBlockedNodes_DryRunRuleExcluded(t *testing.T) {
 		*withNodeConditions(gpuNode("held-1", true), nodeCondition("GPUDriverReady", corev1.ConditionFalse)),
 	}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(BeEmpty())
 }
 
-func TestListBlockedNodes_DeletingRuleExcluded(t *testing.T) {
+func TestListBlockedNodes_DeletingRuleIncluded(t *testing.T) {
 	g := NewWithT(t)
 	rule := gpuRuleWithConditions("GPUDriverReady")
 	now := metav1.Now()
@@ -551,9 +628,14 @@ func TestListBlockedNodes_DeletingRuleExcluded(t *testing.T) {
 		*withNodeConditions(gpuNode("released-1", false), nodeCondition("GPUDriverReady", corev1.ConditionFalse)),
 	}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
 	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(blocked).To(BeEmpty())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
+		"gpu-ready": {"GPUDriverReady": 1},
+	}))
 }
 
 func TestListBlockedNodes_NonMatchingNodeExcluded(t *testing.T) {
@@ -573,7 +655,10 @@ func TestListBlockedNodes_NonMatchingNodeExcluded(t *testing.T) {
 		}, nodeCondition("GPUDriverReady", corev1.ConditionFalse)),
 	}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
 		"gpu-ready": {"GPUDriverReady": 0},
@@ -611,7 +696,10 @@ func TestListBlockedNodes_InvalidSelectorSkipped(t *testing.T) {
 		*withNodeConditions(gpuNode("held-1", true), nodeCondition("GPUDriverReady", corev1.ConditionFalse)),
 	}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).NotTo(HaveKey(invalidRule.Name))
 	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
@@ -628,7 +716,10 @@ func TestListBlockedNodes_ZeroDeclaredConditions(t *testing.T) {
 	}
 	nodes := []corev1.Node{*gpuNode("held-1", true)}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
 		"gpu-ready": {},
@@ -642,7 +733,10 @@ func TestListBlockedNodes_NoRules(t *testing.T) {
 		Client: fc,
 	}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nil)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nil, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(BeEmpty())
 }
@@ -663,7 +757,10 @@ func TestListBlockedNodes_DefaultStatusSatisfies(t *testing.T) {
 		*withNodeConditions(gpuNode("held-1", true), nodeCondition("CondA", corev1.ConditionFalse)),
 	}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
 		"gpu-ready": {"CondA": 1, "CondB": 0},
@@ -683,14 +780,17 @@ func TestListBlockedNodes_AbsentConditionCounted(t *testing.T) {
 
 	nodes := []corev1.Node{*gpuNode("held-1", true)}
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
 		"gpu-ready": {"CondB": 1},
 	}))
 }
 
-// TestSharedNodeSnapshot_BothListersAgree verifies that both listers use the same Node snapshot.
+// TestSharedNodeSnapshot_BothListersAgree verifies that both listers use the same Node and rule snapshot.
 func TestSharedNodeSnapshot_BothListersAgree(t *testing.T) {
 	g := NewWithT(t)
 	rule := gpuRuleWithConditions("GPUDriverReady")
@@ -707,13 +807,16 @@ func TestSharedNodeSnapshot_BothListersAgree(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(nodes).To(HaveLen(2))
 
-	ruleCounts, err := c.ListRuleNodeStates(t.Context(), nodes)
+	rules, err := c.ListRules(t.Context())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	ruleCounts, err := c.ListRuleNodeStates(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(ruleCounts).To(Equal(map[string]metrics.RuleNodeCounts{
 		"gpu-ready": {Held: 1, Released: 1},
 	}))
 
-	blocked, err := c.ListBlockedNodes(t.Context(), nodes)
+	blocked, err := c.ListBlockedNodes(t.Context(), nodes, rules)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(blocked).To(Equal(map[string]metrics.RuleBlockedConditions{
 		"gpu-ready": {"GPUDriverReady": 1},

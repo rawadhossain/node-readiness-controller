@@ -540,23 +540,33 @@ func (r *RuleReadinessController) ListNodes(ctx context.Context) ([]corev1.Node,
 	return nodeList.Items, nil
 }
 
+// ListRules returns the current list of NodeReadinessRules.
+func (r *RuleReadinessController) ListRules(ctx context.Context) ([]*readinessv1alpha1.NodeReadinessRule, error) {
+	ruleList := &readinessv1alpha1.NodeReadinessRuleList{}
+	if err := r.List(ctx, ruleList); err != nil {
+		return nil, err
+	}
+	rules := make([]*readinessv1alpha1.NodeReadinessRule, len(ruleList.Items))
+	for i := range ruleList.Items {
+		rules[i] = &ruleList.Items[i]
+	}
+	return rules, nil
+}
+
 // forEachRuleNode applies callbacks to nodes matching each rule.
+//
+//nolint:unparam // keep error return for future extensibility and API stability.
 func (r *RuleReadinessController) forEachRuleNode(
 	ctx context.Context,
 	nodes []corev1.Node,
+	rules []*readinessv1alpha1.NodeReadinessRule,
 	skipRule func(rule *readinessv1alpha1.NodeReadinessRule) bool,
 	onRule func(rule *readinessv1alpha1.NodeReadinessRule),
 	onNode func(rule *readinessv1alpha1.NodeReadinessRule, node *corev1.Node, held bool),
 ) error {
-	ruleList := &readinessv1alpha1.NodeReadinessRuleList{}
-	if err := r.List(ctx, ruleList); err != nil {
-		return err
-	}
-
 	log := ctrl.LoggerFrom(ctx)
 
-	for i := range ruleList.Items {
-		rule := &ruleList.Items[i]
+	for _, rule := range rules {
 		if rule.Spec.DryRun {
 			continue
 		}
@@ -586,10 +596,10 @@ func (r *RuleReadinessController) forEachRuleNode(
 }
 
 // ListRuleNodeStates returns the number of held and released nodes for each rule.
-func (r *RuleReadinessController) ListRuleNodeStates(ctx context.Context, nodes []corev1.Node) (map[string]metrics.RuleNodeCounts, error) {
+func (r *RuleReadinessController) ListRuleNodeStates(ctx context.Context, nodes []corev1.Node, rules []*readinessv1alpha1.NodeReadinessRule) (map[string]metrics.RuleNodeCounts, error) {
 	counts := make(map[string]metrics.RuleNodeCounts)
 
-	err := r.forEachRuleNode(ctx, nodes,
+	err := r.forEachRuleNode(ctx, nodes, rules,
 		func(rule *readinessv1alpha1.NodeReadinessRule) bool { return false },
 		func(rule *readinessv1alpha1.NodeReadinessRule) {
 			counts[rule.Name] = metrics.RuleNodeCounts{}
@@ -612,11 +622,11 @@ func (r *RuleReadinessController) ListRuleNodeStates(ctx context.Context, nodes 
 }
 
 // ListBlockedNodes returns the number of blocked nodes for each rule and unsatisfied condition.
-func (r *RuleReadinessController) ListBlockedNodes(ctx context.Context, nodes []corev1.Node) (map[string]metrics.RuleBlockedConditions, error) {
+func (r *RuleReadinessController) ListBlockedNodes(ctx context.Context, nodes []corev1.Node, rules []*readinessv1alpha1.NodeReadinessRule) (map[string]metrics.RuleBlockedConditions, error) {
 	result := make(map[string]metrics.RuleBlockedConditions)
 
-	err := r.forEachRuleNode(ctx, nodes,
-		func(rule *readinessv1alpha1.NodeReadinessRule) bool { return !rule.DeletionTimestamp.IsZero() },
+	err := r.forEachRuleNode(ctx, nodes, rules,
+		func(rule *readinessv1alpha1.NodeReadinessRule) bool { return false },
 		func(rule *readinessv1alpha1.NodeReadinessRule) {
 			counts := make(metrics.RuleBlockedConditions, len(rule.Spec.Conditions))
 			for _, cond := range rule.Spec.Conditions {
@@ -660,15 +670,6 @@ func (r *RuleReadinessController) ruleAppliesTo(ctx context.Context, rule *readi
 	}
 
 	return selector.Matches(labels.Set(node.Labels))
-}
-
-// checks if a rule applies to a node and has its taint.
-func (r *RuleReadinessController) ruleAppliesToWithTaint(ctx context.Context, rule *readinessv1alpha1.NodeReadinessRule, node *corev1.Node) (applies, held bool) {
-	applies = r.ruleAppliesTo(ctx, rule, node)
-	if !applies {
-		return false, false
-	}
-	return true, r.hasTaintBySpec(node, rule.Spec.Taint)
 }
 
 // updateRuleCache updates the rule cache.
@@ -817,15 +818,20 @@ func (r *RuleReadinessController) processDryRun(ctx context.Context, rule *readi
 func (r *RuleReadinessController) cleanupTaintsForRule(ctx context.Context, rule *readinessv1alpha1.NodeReadinessRule, nodeList *corev1.NodeList) error {
 	log := ctrl.LoggerFrom(ctx)
 
+	selector, err := parseNodeSelector(rule)
+	if err != nil {
+		log.Error(err, "Invalid node selector for rule during cleanup", "rule", rule.Name)
+		return nil
+	}
+
 	var errors []string
 	for _, node := range nodeList.Items {
-		applies, held := r.ruleAppliesToWithTaint(ctx, rule, &node)
-		if !applies {
+		if !selector.Matches(labels.Set(node.Labels)) {
 			continue
 		}
 
 		// Check if node has the taint managed by this rule
-		if held {
+		if r.hasTaintBySpec(&node, rule.Spec.Taint) {
 			log.Info("Removing taint from node during rule cleanup",
 				"node", node.Name,
 				"rule", rule.Name,
