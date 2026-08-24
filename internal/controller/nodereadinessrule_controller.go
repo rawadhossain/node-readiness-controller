@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -709,6 +710,7 @@ func (r *RuleReadinessController) updateRuleCache(ctx context.Context, rule *rea
 	ruleCopy := rule.DeepCopy()
 	r.ruleCache[rule.Name] = ruleCopy
 	metrics.RulesTotal.Set(float64(len(r.ruleCache)))
+	r.syncRulesByModeLocked()
 	log.V(4).Info("Updated rule cache",
 		"rule", rule.Name,
 		"totalRules", len(r.ruleCache),
@@ -723,7 +725,22 @@ func (r *RuleReadinessController) removeRuleFromCache(ctx context.Context, ruleN
 
 	delete(r.ruleCache, ruleName)
 	metrics.RulesTotal.Set(float64(len(r.ruleCache)))
+	r.syncRulesByModeLocked()
 	log.Info("Removed rule from cache", "rule", ruleName, "totalRules", len(r.ruleCache))
+}
+
+// syncRulesByModeLocked updates RulesByMode from the rule cache.
+func (r *RuleReadinessController) syncRulesByModeLocked() {
+	counts := make(map[[2]string]int)
+	for _, rule := range r.ruleCache {
+		key := [2]string{string(rule.Spec.EnforcementMode), strconv.FormatBool(rule.Spec.DryRun)}
+		counts[key]++
+	}
+
+	metrics.RulesByMode.Reset()
+	for key, count := range counts {
+		metrics.RulesByMode.WithLabelValues(key[0], key[1]).Set(float64(count))
+	}
 }
 
 // patchRuleStatusWithOptimisticLock fetches the latest NodeReadinessRule, and apply mutate status

@@ -17,14 +17,17 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	readinessv1alpha1 "sigs.k8s.io/node-readiness-controller/api/v1alpha1"
+	"sigs.k8s.io/node-readiness-controller/internal/metrics"
 )
 
 func TestBootstrapAnnotationKey(t *testing.T) {
@@ -302,4 +305,62 @@ func TestApplyNodeStatusDelta(t *testing.T) {
 		g.Expect(rule.Status.NodeEvaluations[1].NodeName).To(Equal("other-node"))
 		g.Expect(rule.Status.FailedNodes).To(BeEmpty())
 	})
+}
+
+func TestSyncRulesByModeLocked(t *testing.T) {
+	g := NewWithT(t)
+	metrics.RulesByMode.Reset()
+	t.Cleanup(metrics.RulesByMode.Reset)
+
+	c := &RuleReadinessController{
+		ruleCache: make(map[string]*readinessv1alpha1.NodeReadinessRule),
+	}
+	ctx := t.Context()
+
+	newRule := func(name string, mode readinessv1alpha1.EnforcementMode, dryRun bool) *readinessv1alpha1.NodeReadinessRule {
+		return &readinessv1alpha1.NodeReadinessRule{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: readinessv1alpha1.NodeReadinessRuleSpec{
+				EnforcementMode: mode,
+				DryRun:          dryRun,
+			},
+		}
+	}
+
+	ruleA := newRule("rule-a", readinessv1alpha1.EnforcementModeBootstrapOnly, false)
+	ruleB := newRule("rule-b", readinessv1alpha1.EnforcementModeBootstrapOnly, false)
+	ruleC := newRule("rule-c", readinessv1alpha1.EnforcementModeContinuous, true)
+
+	c.updateRuleCache(ctx, ruleA)
+	c.updateRuleCache(ctx, ruleB)
+	c.updateRuleCache(ctx, ruleC)
+
+	expected := `
+# HELP node_readiness_rules Number of NodeReadinessRules by enforcement mode and dry-run state
+# TYPE node_readiness_rules gauge
+node_readiness_rules{dry_run="false",enforcement_mode="bootstrap-only"} 2
+node_readiness_rules{dry_run="true",enforcement_mode="continuous"} 1
+`
+	g.Expect(testutil.CollectAndCompare(metrics.RulesByMode, strings.NewReader(expected), "node_readiness_rules")).To(Succeed())
+
+	c.removeRuleFromCache(ctx, "rule-c")
+
+	expected = `
+# HELP node_readiness_rules Number of NodeReadinessRules by enforcement mode and dry-run state
+# TYPE node_readiness_rules gauge
+node_readiness_rules{dry_run="false",enforcement_mode="bootstrap-only"} 2
+`
+	g.Expect(testutil.CollectAndCompare(metrics.RulesByMode, strings.NewReader(expected), "node_readiness_rules")).To(Succeed())
+
+	ruleB.Spec.EnforcementMode = readinessv1alpha1.EnforcementModeContinuous
+	ruleB.Spec.DryRun = true
+	c.updateRuleCache(ctx, ruleB)
+
+	expected = `
+# HELP node_readiness_rules Number of NodeReadinessRules by enforcement mode and dry-run state
+# TYPE node_readiness_rules gauge
+node_readiness_rules{dry_run="false",enforcement_mode="bootstrap-only"} 1
+node_readiness_rules{dry_run="true",enforcement_mode="continuous"} 1
+`
+	g.Expect(testutil.CollectAndCompare(metrics.RulesByMode, strings.NewReader(expected), "node_readiness_rules")).To(Succeed())
 }
