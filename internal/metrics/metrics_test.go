@@ -61,28 +61,9 @@ func TestEvaluationDuration(t *testing.T) {
 		EvaluationDuration.WithLabelValues("registration-check").Observe(0)
 		defer EvaluationDuration.Reset()
 
-		gathered, err := metrics.Registry.Gather()
-		if err != nil {
-			t.Fatalf("failed to gather metrics: %v", err)
-		}
-
-		var found bool
-		for _, mf := range gathered {
-			if mf.GetName() == "node_readiness_evaluation_duration_seconds" {
-				found = true
-				if got := mf.GetType().String(); got != "HISTOGRAM" {
-					t.Fatalf("expected node_readiness_evaluation_duration_seconds to be a histogram, got %s", got)
-				}
-				const wantHelp = "Duration of rule evaluations per rule, including taint operations"
-				if got := mf.GetHelp(); got != wantHelp {
-					t.Fatalf("unexpected help text: got %q, want %q", got, wantHelp)
-				}
-				break
-			}
-		}
-		if !found {
-			t.Fatal("expected node_readiness_evaluation_duration_seconds to be registered with the controller-runtime metrics registry")
-		}
+		assertMetricRegistered(t, metrics.Registry,
+			"node_readiness_evaluation_duration_seconds", "HISTOGRAM",
+			"Duration of evaluating a rule against a node, including any taint add/remove operations")
 	})
 
 	t.Run("label set is exactly rule", func(t *testing.T) {
@@ -105,7 +86,7 @@ func TestEvaluationDuration(t *testing.T) {
 		EvaluationDuration.WithLabelValues("test-rule").Observe(0.2)
 
 		expected := `
-# HELP node_readiness_evaluation_duration_seconds Duration of rule evaluations per rule, including taint operations
+# HELP node_readiness_evaluation_duration_seconds Duration of evaluating a rule against a node, including any taint add/remove operations
 # TYPE node_readiness_evaluation_duration_seconds histogram
 node_readiness_evaluation_duration_seconds_bucket{rule="test-rule",le="0.005"} 0
 node_readiness_evaluation_duration_seconds_bucket{rule="test-rule",le="0.01"} 0
@@ -122,9 +103,7 @@ node_readiness_evaluation_duration_seconds_bucket{rule="test-rule",le="+Inf"} 1
 node_readiness_evaluation_duration_seconds_sum{rule="test-rule"} 0.2
 node_readiness_evaluation_duration_seconds_count{rule="test-rule"} 1
 `
-		if err := testutil.CollectAndCompare(EvaluationDuration, strings.NewReader(expected), "node_readiness_evaluation_duration_seconds"); err != nil {
-			t.Fatalf("unexpected collecting result:\n%s", err)
-		}
+		assertObservationReflected(t, EvaluationDuration, "node_readiness_evaluation_duration_seconds", expected)
 
 		if got, want := testutil.CollectAndCount(EvaluationDuration, "node_readiness_evaluation_duration_seconds"), 1; got != want {
 			t.Fatalf("expected %d observed series, got %d", want, got)
@@ -147,4 +126,37 @@ node_readiness_evaluation_duration_seconds_count{rule="test-rule"} 1
 			t.Fatalf("expected %d observed series after delete, got %d", want, got)
 		}
 	})
+}
+
+// assertMetricRegistered checks that the metric is registered correctly.
+func assertMetricRegistered(t *testing.T, registry prometheus.Gatherer, name, wantType, wantHelp string) {
+	t.Helper()
+
+	gathered, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("failed to gather metrics: %v", err)
+	}
+
+	for _, mf := range gathered {
+		if mf.GetName() != name {
+			continue
+		}
+		if got := mf.GetType().String(); got != wantType {
+			t.Fatalf("expected %s to be a %s, got %s", name, wantType, got)
+		}
+		if got := mf.GetHelp(); got != wantHelp {
+			t.Fatalf("unexpected help text for %s: got %q, want %q", name, got, wantHelp)
+		}
+		return
+	}
+	t.Fatalf("expected %s to be registered with the controller-runtime metrics registry", name)
+}
+
+// assertObservationReflected checks the collected metric.
+func assertObservationReflected(t *testing.T, collector prometheus.Collector, name, expectedExposition string) {
+	t.Helper()
+
+	if err := testutil.CollectAndCompare(collector, strings.NewReader(expectedExposition), name); err != nil {
+		t.Fatalf("unexpected collecting result:\n%s", err)
+	}
 }
